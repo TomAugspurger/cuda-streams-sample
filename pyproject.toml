@@ -9,4 +9,42 @@ dependencies = [
     "cupy-cuda12x>=13.4.1",
     "numba-cuda[cu12]>=0.15.2",
     "pynvjitlink-cu12>=0.7.0",
+    "cudf-polars-cu12==25.8.0a442",
+    "pylibcudf-cu12==25.8.0a442",
+    "libcudf-cu12==25.8.0a442",
+    "rmm-cu12==25.8.0a46",
+    "librmm-cu12==25.8.0a46",
+    "libkvikio-cu12==25.8.0a46",
+    "kvikio-cu12==25.8.0a46",
 ]
+
+[[tool.uv.index]]
+name = "cudf-polars-cu12"
+url = "https://pypi.anaconda.org/rapidsai-wheels-nightly/simple"
+
+[[tool.uv.index]]
+name = "pylibcudf-cu12"
+url = "https://pypi.anaconda.org/rapidsai-wheels-nightly/simple"
+
+[[tool.uv.index]]
+name = "libcudf-cu12"
+url = "https://pypi.anaconda.org/rapidsai-wheels-nightly/simple"
+
+[[tool.uv.index]]
+name = "rmm-cu12"
+url = "https://pypi.anaconda.org/rapidsai-wheels-nightly/simple"
+
+[[tool.uv.index]]
+name = "librmm-cu12"
+url = "https://pypi.anaconda.org/rapidsai-wheels-nightly/simple"
+
+[[tool.uv.index]]
+name = "kvikio-cu12"
+url = "https://pypi.anaconda.org/rapidsai-wheels-nightly/simple"
+
+[[tool.uv.index]]
+name = "libkvikio-cu12"
+url = "https://pypi.anaconda.org/rapidsai-wheels-nightly/simple"
+
+
+
