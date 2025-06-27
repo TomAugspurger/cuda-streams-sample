@@ -16,6 +16,7 @@ dependencies = [
     "librmm-cu12==25.8.0a46",
     "libkvikio-cu12==25.8.0a46",
     "kvikio-cu12==25.8.0a46",
+    "ipython>=9.3.0",
 ]
 
 [[tool.uv.index]]
