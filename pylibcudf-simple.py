@@ -33,11 +33,12 @@ def main():
     streams = [numba.cuda.stream() for _ in range(N_STREAMS)]
 
     # warmup
-    plc.io.parquet.read_parquet(opts)
-    my_kernel[256, 1](
-        numba.cuda.device_array(1, dtype="int64"),
-        numba.cuda.device_array(1, dtype="int64"),
-    )
+    with nvtx.annotate("warmup"):
+        plc.io.parquet.read_parquet(opts)
+        my_kernel[256, 1](
+            numba.cuda.device_array(1, dtype="int64"),
+            numba.cuda.device_array(1, dtype="int64"),
+        )
 
     with nvtx.annotate("benchmark"):
         for stream in streams:
@@ -46,13 +47,15 @@ def main():
                 opts, stream=rmm.pylibrmm.stream.Stream(stream)
             )
             out = numba.cuda.device_array(1, dtype="int64", stream=stream)  # type: ignore[arg-type]
+            # Column.data() has a type of '|u1' so we're operating on the raw bytes of the array
+            # This is clearly wrong (the sum is incorrect), but good enough for our testing.
             my_kernel[256, 1, stream](df.columns[0].data(), out)  # type: ignore[call-overload]
 
         # and synchronize
         for stream in streams:
             stream.synchronize()
 
-    print("done")
+    print("done", out.copy_to_host()[0])
 
 
 if __name__ == "__main__":
