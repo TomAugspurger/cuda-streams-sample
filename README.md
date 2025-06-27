@@ -21,3 +21,10 @@ In particular, note that
 - We have good utilization of the memory system (no gaps in the teal)
 - We have good utilization of the compute system (no gaps in the blue)
 
+
+## pylibcudf-sample
+
+pylibcudf is still working to provide an API that expose streams (https://github.com/rapidsai/cudf/issues/18962). [pylibcudf-simple.py](./pylibcudf-simple.py)
+is a rough attempt. Things look less good here, but this could easily be user-error.
+
+
