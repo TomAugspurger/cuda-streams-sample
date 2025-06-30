@@ -24,7 +24,12 @@ In particular, note that
 
 ## pylibcudf-sample
 
-pylibcudf is still working to provide an API that expose streams (https://github.com/rapidsai/cudf/issues/18962). [pylibcudf-simple.py](./pylibcudf-simple.py)
-is a rough attempt. Things look less good here, but this could easily be user-error.
+pylibcudf is still working to provide an API that expose streams
+(https://github.com/rapidsai/cudf/issues/18962).
+[pylibcudf-simple.py](./pylibcudf-simple.py) is a rough attempt. Things look
+less good here, but this could easily be user-error. This example
 
+1. Launches a `plc.io.parquet.read_parquet` (one per stream).
+2. Launches a `numba.cuda` kernel on the data (one per stream)
 
+See https://github.com/TomAugspurger/cuda-streams-sample/issues/3 for an analysis.
