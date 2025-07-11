@@ -21,7 +21,7 @@ BITSTREAM_KIND = nvcomp.BitstreamKind.RAW
 def launch_decode(
     codec: nvcomp.Codec, arrays: list[numba.cuda.cudadrv.devicearray.DeviceNDArray]
 ) -> None:
-    codec.decode(arrays)
+    return codec.decode(arrays)
 
 
 @nvtx.annotate("direct")
@@ -48,32 +48,53 @@ def do(
     host_buffer: np.ndarray,
     use_thread: bool,
 ):
-    futures = []
-    for stream in streams:
-        # host to device transfer
-        # https://docs.nvidia.com/cuda/nvcomp/samples/nvcomp.html#Zero-copy-import-host-array
-        device_arrays = nvcomp.as_arrays(
-            [numba.cuda.to_device(host_buffer, stream=stream) for _ in range(5)]
-        )
-        # nvtx.mark("Device arrays")
-        codec = nvcomp.Codec(
+    
+    codecs = [
+        nvcomp.Codec(
             algorithm="Zstd",
             level=LEVEL,
             bitstream_kind=BITSTREAM_KIND,
             cuda_stream=int(stream),
         )
+        for stream in streams
+    ]
+
+    # Pretty subtle issue around reference counting and performance here.
+    # The nvcomp.Array objects returned by nvcomp are ref counted noramally.
+    # But `cudaFreeHost` *possibly* blocks? It's not clear to me whether that's
+    # actually true, base based on the screenshots in
+    # https://github.com/TomAugspurger/cuda-streams-sample/issues/4#issue-3224110244
+    # that sure seems plausible.
+    #
+    # To remove this potential issue, we'll keep a reference to the output nvcomp arrays
+    # (which is more realistic anyway, though someone does need to free memory at *some* point,
+    # and we'll have to be careful to not block...)
+    # for the threaded case, we have a reference via the Future.
+    # for the non-threaded case, we just have the Array returned by `codec.decode`.
+    xs = []
+    for stream, codec in zip(streams, codecs):
+        # host to device transfer
+        # https://docs.nvidia.com/cuda/nvcomp/samples/nvcomp.html#Zero-copy-import-host-array
+        device_arrays = nvcomp.as_arrays(
+            [numba.cuda.to_device(host_buffer, stream=stream) for _ in range(5)]
+        )
         # is this blocking!?
         if use_thread:
             with nvtx.annotate("launch-decode"):
-                futures.append(pool.submit(launch_decode, codec, device_arrays))
-            # for future in concurrent.futures.as_completed(futures):
-            #     future.result()
+                xs.append(pool.submit(launch_decode, codec, device_arrays))
         else:
             with nvtx.annotate("launch-decode"):
-                launch_decode(codec, device_arrays)
+                xs.append(launch_decode(codec, device_arrays))
 
     for stream in streams:
         stream.synchronize()
+
+
+
+def all_threaded():
+    # do everything inside a thread
+    ...
+
 
 
 def main():
