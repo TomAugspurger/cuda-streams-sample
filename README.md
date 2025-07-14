@@ -22,7 +22,7 @@ In particular, note that
 - We have good utilization of the compute system (no gaps in the blue)
 
 
-## pylibcudf-sample
+## pylibcudf-simple
 
 pylibcudf is still working to provide an API that expose streams
 (https://github.com/rapidsai/cudf/issues/18962).
@@ -33,3 +33,10 @@ less good here, but this could easily be user-error. This example
 2. Launches a `numba.cuda` kernel on the data (one per stream)
 
 See https://github.com/TomAugspurger/cuda-streams-sample/issues/3 for an analysis.
+
+## nvcomp-simple
+
+See [nvcomp-simple.py](./nvcomp-simple.py). This workload copies Zstd-compressed
+data from the host to the device, and uses nvcomp to decompress the data. The
+host-to-device transfers and the decompression are overlapped using CUDA
+streams.
