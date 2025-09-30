@@ -12,3 +12,4 @@ wheels/
 *.nsys-rep
 *.parquet
 *.log
+*.zarr
