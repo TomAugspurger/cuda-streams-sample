@@ -46,22 +46,24 @@ async def producer_chunk(shape=(1048576,), dtype="float32", *, pool: cupy.cuda.p
     return np.ndarray(shape=shape, strides=strides, order=order, dtype=dtype, buffer=buffer)
 
 
-async def copier(host_array: np.ndarray, stream: numba.cuda.cudadrv.driver.Stream) -> numba.cuda.devicearray.DeviceNDArray:
+async def copier(host_array: np.ndarray, stream: numba.cuda.cudadrv.driver.Stream, device_index: int) -> numba.cuda.devicearray.DeviceNDArray:
     # ~ 850us
-    return numba.cuda.to_device(host_array, stream=stream)
+    with numba.cuda.gpus[device_index]:
+        return numba.cuda.to_device(host_array, stream=stream)
 
 
-async def consumer(device_array: numba.cuda.devicearray.DeviceNDArray, stream: numba.cuda.cudadrv.driver.Stream) -> None:
-    incr[256, 1, stream](device_array)
-    return device_array
+async def consumer(device_array: numba.cuda.devicearray.DeviceNDArray, stream: numba.cuda.cudadrv.driver.Stream, device_index: int) -> numba.cuda.devicearray.DeviceNDArray:
+    with numba.cuda.gpus[device_index]:
+        incr[256, 1, stream](device_array)
+        return device_array
 
 
-async def pipeline(stream: numba.cuda.cudadrv.driver.Stream):
+async def pipeline(stream: numba.cuda.cudadrv.driver.Stream, device_index: int):
     # stream = numba.cuda.stream()
     rng = nvtx.start_range(message="chunk")
     host_array = await producer_chunk()
-    device_array = await copier(host_array, stream)
-    result = await consumer(device_array, stream)
+    device_array = await copier(host_array, stream, device_index)
+    result = await consumer(device_array, stream, device_index)
     return result, stream, rng
 
 
@@ -70,32 +72,40 @@ async def main():
 
     with nvtx.annotate("warmup"):
         stream = numba.cuda.stream()
-        _, _, rng = await pipeline(stream)
+        _, _, rng = await pipeline(stream, 0)
         stream.synchronize()
         nvtx.end_range(rng)
     
     
     # Total number of chunks to process.
-    n_chunks = 20
+    n_chunks = 160
 
     # Number of concurrent streams to use.
-    n_streams = 20
+    n_streams = 80
+
+    # number of devices
+    n_devices = len(numba.cuda.gpus)
 
     n_chunks_per_stream = n_chunks // n_streams
-    streams = [numba.cuda.stream() for _ in range(n_streams)]
+    # streams = [numba.cuda.stream() for _ in range(n_streams)]
+    streams = []
+    for i in range(n_streams):
+        device_index = i % n_devices
+        with numba.cuda.gpus[device_index]:
+            streams.append((numba.cuda.stream(), device_index))
     coros = []
 
-    for stream in streams:
+    for stream, device_index in streams:
         for _ in range(n_chunks_per_stream):
-            coros.append(pipeline(stream))
+            coros.append(pipeline(stream, device_index))
         # the remainder from n_chunks not being divisible by n_streams
-        for _ in range(n_chunks % n_streams):
-            coros.append(pipeline(stream))
+        for i in range(n_chunks % n_streams):
+            coros.append(pipeline(stream, i % n_devices))
 
-    results = await asyncio.gather(*coros)
-    for result, stream, rng in results:
+    for (result, stream, rng) in await asyncio.gather(*coros):
         stream.synchronize()
         nvtx.end_range(rng)
+        del result
 
     print("done")
 
