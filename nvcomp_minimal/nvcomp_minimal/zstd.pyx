@@ -40,39 +40,6 @@ cdef class DecompressedArray:
         }
 
 
-cdef void* _extract_ptr(obj) except NULL:
-    """Extract device pointer from object with __cuda_array_interface__."""
-    cai = obj.__cuda_array_interface__
-    ptr = cai['data'][0]
-    return <void*><uintptr_t>ptr
-
-
-cdef size_t _extract_size(obj) except 0:
-    """Extract size in bytes from object with __cuda_array_interface__."""
-    cai = obj.__cuda_array_interface__
-    shape = cai['shape']
-    typestr = cai['typestr']
-    
-    # Calculate itemsize from typestr (e.g., '|u1' -> 1, '<i8' -> 8)
-    # Format is: [byteorder][type][size], e.g., '<i8', '|u1'
-    cdef int itemsize
-    if len(typestr) >= 2:
-        try:
-            # Extract numeric part (everything after the type character)
-            itemsize = int(typestr[2:])
-        except (ValueError, IndexError):
-            itemsize = 1
-    else:
-        itemsize = 1
-    
-    # Calculate total bytes
-    cdef size_t total = itemsize
-    for dim in shape:
-        total *= dim
-    
-    return total
-
-
 cdef class ZstdCodec:
     """Batched Zstd decompression codec."""
     
@@ -87,78 +54,17 @@ cdef class ZstdCodec:
         """
         self.stream_ptr = stream_ptr
         self.stream = <cudaStream_t>stream_ptr
-    
-#     def decode(self, arrays: list[cupy.ndarray]):
-#         cdef size_t num_chunks = len(arrays)
-# 
-#         # TODO: ensure stream ordered allocation.
-#         cdef device_compressed_chunk_ptrs = cupy.empty(num_chunks, dtype=np.uintp)
-#         cdef device_compressed_chunk_bytes = cupy.empty(num_chunks, dtype=np.uintp)
-#         # cdef device_uncompressed_buffer_bytes = []
-#         cdef device_uncompressed_chunk_bytes = cupy.empty(num_chunks, dtype=np.uintp)
-#         cdef device_uncompressed_chunk_bytes_actual = cupy.empty(num_chunks, dtype=np.uintp)
-# 
-#         for i, array in enumerate(arrays):
-#             cai = array.__cuda_array_interface__
-#             device_compressed_chunk_ptrs[i] = cai["data"][0]
-#             device_compressed_chunk_bytes[i] = (
-#                 np.dtype(cai["typestr"]).itemsize * math.prod(cai["shape"])
-#             )
-#         # TODO: stream ordered allocation.
-# 
-#         status = nvcompBatchedZstdGetDecompressSizeAsync(
-#             <const void* const*><void**><uintptr_t>device_compressed_chunk_ptrs.data.ptr,
-#             <size_t*><uintptr_t>device_compressed_chunk_bytes.data.ptr,
-#             <size_t*><uintptr_t>device_uncompressed_chunk_bytes.data.ptr,
-#             num_chunks,
-#             self.stream
-#         )
-#         if status != nvcompSuccess:
-#             raise RuntimeError(f"nvcompBatchedZstdGetDecompressSizeAsync failed: {status}")
-# 
-#         # Get temp buffer size
-#         temp_bytes = 0
-#         status = nvcompBatchedZstdDecompressGetTempSizeAsync(
-#             num_chunks,
-#             max_decompressed,
-#             nvcompBatchedZstdDecompressDefaultOpts,
-#             &temp_bytes,
-#             total_decompressed
-#         )
-#         if status != nvcompSuccess:
-#             raise RuntimeError(f"nvcompBatchedZstdDecompressGetTempSizeAsync failed: {status}")
-#         
-#         # Allocate temp buffer using CuPy
-#         temp_mem = None
-#         temp_ptr = NULL
-#         if temp_bytes > 0:
-#             temp_mem = cupy.empty(temp_bytes, dtype=cupy.uint8)
-#             temp_ptr = <void*><uintptr_t>temp_mem.data.ptr
-# 
-# 
-# 
-#         print(device_uncompressed_chunk_bytes)
-#         status = nvcompBatchedZstdDecompressAsync(
-#             <const void* const*><void**><uintptr_t>device_compressed_chunk_ptrs,
-#             <size_t*><uintptr_t>device_compressed_chunk_bytes.data.ptr,
-#             <size_t*><uintptr_t>device_uncompressed_buffer_bytes.data.ptr,
-#             <size_t*><uintptr_t>device_uncompressed_chunk_bytes_actual.data.ptr,
-#             device_uncompressed_chunk_bytes,
-#             num_chunks,
-#             device_temp_ptr,
-#             temp_bytes,
-#             device_uncompressed_chunk_ptrs,
-#             decompress_opts,
-#             device_statuses,
-#             self.stream,
-#         )
-#     
-    def decode_batch(self, compressed_buffers):
+     
+    def decode_batch(self, compressed_buffers, out=None):
         """Decompress a batch of zstd-compressed buffers.
         
         Args:
             compressed_buffers: List of objects with __cuda_array_interface__
                                containing compressed data on GPU
+            out: Optional list of pre-allocated CuPy arrays for output.
+                 When provided, skips size query and uses these buffers.
+                 Must match the number of compressed_buffers and have
+                 sufficient size for decompressed data.
         
         Returns:
             List of DecompressedArray objects with __cuda_array_interface__
@@ -180,6 +86,11 @@ cdef class ZstdCodec:
         if batch_size == 0:
             return []
 
+        # Validate out parameter if provided
+        if out is not None:
+            if <size_t>len(out) != batch_size:
+                raise ValueError(f"out must have {batch_size} elements, got {len(out)}")
+
         # Extract pointers and sizes from input buffers into Python lists first
         import numpy as np
         compressed_ptrs_list = []
@@ -196,33 +107,63 @@ cdef class ZstdCodec:
         
         compressed_ptrs_gpu = cupy.asarray(compressed_ptrs_np)
         compressed_bytes_gpu = cupy.asarray(compressed_bytes_np)
-        decompressed_bytes_gpu = cupy.empty(batch_size, dtype=cupy.uint64)
         actual_decompressed_bytes_gpu = cupy.empty(batch_size, dtype=cupy.uint64)
         
         # Get device pointers
         compressed_ptrs = <void**><uintptr_t>compressed_ptrs_gpu.data.ptr
         compressed_bytes = <size_t*><uintptr_t>compressed_bytes_gpu.data.ptr
-        decompressed_bytes = <size_t*><uintptr_t>decompressed_bytes_gpu.data.ptr
         actual_decompressed_bytes = <size_t*><uintptr_t>actual_decompressed_bytes_gpu.data.ptr
         
+        # Handle output buffers - either query sizes or use provided buffers
+        if out is not None:
+            # User provided output buffers - extract sizes from them
+            output_mems = out
+            decompressed_bytes_list = []
+            output_ptrs_list = []
+            for i in range(batch_size):
+                cai = out[i].__cuda_array_interface__
+                nbytes = np.dtype(cai["typestr"]).itemsize * math.prod(cai["shape"])
+                decompressed_bytes_list.append(nbytes)
+                output_ptrs_list.append(cai["data"][0])
+            
+            decompressed_bytes_np = np.array(decompressed_bytes_list, dtype=np.uint64)
+            decompressed_bytes_gpu = cupy.asarray(decompressed_bytes_np)
+            decompressed_bytes_host = decompressed_bytes_np
+            
+            max_decompressed = decompressed_bytes_host.max()
+            total_decompressed = decompressed_bytes_host.sum()
+        else:
+            # Query decompressed sizes and allocate buffers
+            decompressed_bytes_gpu = cupy.empty(batch_size, dtype=cupy.uint64)
+            decompressed_bytes = <size_t*><uintptr_t>decompressed_bytes_gpu.data.ptr
+            
+            status = nvcompBatchedZstdGetDecompressSizeAsync(
+                <const void* const*>compressed_ptrs,
+                compressed_bytes,
+                decompressed_bytes,
+                batch_size,
+                self.stream
+            )
+            if status != nvcompSuccess:
+                raise RuntimeError(f"nvcompBatchedZstdGetDecompressSizeAsync failed: {status}")
+            
+            # Copy decompressed sizes back to host to calculate max and total
+            decompressed_bytes_host = decompressed_bytes_gpu.get()
+            
+            # Find max and total decompressed sizes
+            max_decompressed = decompressed_bytes_host.max()
+            total_decompressed = decompressed_bytes_host.sum()
+            
+            # Allocate output buffers using CuPy and collect their pointers
+            output_mems = []
+            output_ptrs_list = []
+            for i in range(batch_size):
+                mem = cupy.empty(int(decompressed_bytes_host[i]), dtype=cupy.uint8)
+                output_mems.append(mem)
+                output_ptrs_list.append(mem.data.ptr)
         
-        # Get decompressed sizes
-        status = nvcompBatchedZstdGetDecompressSizeAsync(
-            <const void* const*>compressed_ptrs,
-            compressed_bytes,
-            decompressed_bytes,
-            batch_size,
-            self.stream
-        )
-        if status != nvcompSuccess:
-            raise RuntimeError(f"nvcompBatchedZstdGetDecompressSizeAsync failed: {status}")
-        
-        # Copy decompressed sizes back to host to calculate max and total
-        decompressed_bytes_host = decompressed_bytes_gpu.get()
-        
-        # Find max and total decompressed sizes
-        max_decompressed = decompressed_bytes_host.max()
-        total_decompressed = decompressed_bytes_host.sum()
+        # Get final device pointer for decompressed_bytes
+        decompressed_bytes = <size_t*><uintptr_t>decompressed_bytes_gpu.data.ptr
         
         # Get temp buffer size
         temp_bytes = 0
@@ -246,14 +187,6 @@ cdef class ZstdCodec:
         # Allocate device statuses buffer using CuPy
         device_statuses_mem = cupy.empty(batch_size, dtype=cupy.int32)
         device_statuses = <nvcompStatus_t*><uintptr_t>device_statuses_mem.data.ptr
-        
-        # Allocate output buffers using CuPy and collect their pointers
-        output_mems = []
-        output_ptrs_list = []
-        for i in range(batch_size):
-            mem = cupy.empty(int(decompressed_bytes_host[i]), dtype=cupy.uint8)
-            output_mems.append(mem)
-            output_ptrs_list.append(mem.data.ptr)
         
         # Create device array of output pointers
         output_ptrs_np = np.array(output_ptrs_list, dtype=np.uint64)
@@ -290,5 +223,5 @@ cdef class ZstdCodec:
                 output_mems[i]  # Keep memory alive
             )
             result.append(arr)
-        
+
         return result
