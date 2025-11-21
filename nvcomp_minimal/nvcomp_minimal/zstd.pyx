@@ -88,51 +88,71 @@ cdef class ZstdCodec:
         self.stream_ptr = stream_ptr
         self.stream = <cudaStream_t>stream_ptr
     
-    def decode(self, arrays: list[cupy.ndarray]):
-        cdef size_t num_chunks = len(arrays)
-
-        # TODO: ensure stream ordered allocation.
-        cdef device_compressed_chunk_ptrs = cupy.empty(num_chunks, dtype=np.uintp)
-        cdef device_compressed_chunk_bytes = cupy.empty(num_chunks, dtype=np.uintp)
-        # cdef device_uncompressed_buffer_bytes = []
-        cdef device_uncompressed_chunk_bytes = cupy.empty(num_chunks, dtype=np.uintp)
-
-        for i, array in enumerate(arrays):
-            cai = array.__cuda_array_interface__
-            device_compressed_chunk_ptrs[i] = cai["data"][0]
-            device_compressed_chunk_bytes[i] = (
-                np.dtype(cai["typestr"]).itemsize * math.prod(cai["shape"])
-            )
-        # TODO: stream ordered allocation.
-
-        status = nvcompBatchedZstdGetDecompressSizeAsync(
-            <const void* const*><void**><uintptr_t>device_compressed_chunk_ptrs.data.ptr,
-            <size_t*><uintptr_t>device_compressed_chunk_bytes.data.ptr,
-            <size_t*><uintptr_t>device_uncompressed_chunk_bytes.data.ptr,
-            num_chunks,
-            self.stream
-        )
-        if status != nvcompSuccess:
-            raise RuntimeError(f"nvcompBatchedZstdGetDecompressSizeAsync failed: {status}")
-
-        print(device_uncompressed_chunk_bytes)
-        
-#        decompressed_bytes_gpu = cupy.empty(num_chunks, dtype=cupy.uint64)
-#
-#        status = nvcompBatchedZstdDecompressAsync(
-#            device_compressed_chunk_ptrs,
-#            device_compressed_chunk_bytes,
-#            device_uncompressed_buffer_bytes,
-#            device_uncompressed_chunk_bytes,
-#            num_chunks,
-#            device_temp_ptr,
-#            temp_bytes,
-#            device_uncompressed_chunk_ptrs,
-#            decompress_opts,
-#            device_statuses,
-#            self.stream,
-#        )
-    
+#     def decode(self, arrays: list[cupy.ndarray]):
+#         cdef size_t num_chunks = len(arrays)
+# 
+#         # TODO: ensure stream ordered allocation.
+#         cdef device_compressed_chunk_ptrs = cupy.empty(num_chunks, dtype=np.uintp)
+#         cdef device_compressed_chunk_bytes = cupy.empty(num_chunks, dtype=np.uintp)
+#         # cdef device_uncompressed_buffer_bytes = []
+#         cdef device_uncompressed_chunk_bytes = cupy.empty(num_chunks, dtype=np.uintp)
+#         cdef device_uncompressed_chunk_bytes_actual = cupy.empty(num_chunks, dtype=np.uintp)
+# 
+#         for i, array in enumerate(arrays):
+#             cai = array.__cuda_array_interface__
+#             device_compressed_chunk_ptrs[i] = cai["data"][0]
+#             device_compressed_chunk_bytes[i] = (
+#                 np.dtype(cai["typestr"]).itemsize * math.prod(cai["shape"])
+#             )
+#         # TODO: stream ordered allocation.
+# 
+#         status = nvcompBatchedZstdGetDecompressSizeAsync(
+#             <const void* const*><void**><uintptr_t>device_compressed_chunk_ptrs.data.ptr,
+#             <size_t*><uintptr_t>device_compressed_chunk_bytes.data.ptr,
+#             <size_t*><uintptr_t>device_uncompressed_chunk_bytes.data.ptr,
+#             num_chunks,
+#             self.stream
+#         )
+#         if status != nvcompSuccess:
+#             raise RuntimeError(f"nvcompBatchedZstdGetDecompressSizeAsync failed: {status}")
+# 
+#         # Get temp buffer size
+#         temp_bytes = 0
+#         status = nvcompBatchedZstdDecompressGetTempSizeAsync(
+#             num_chunks,
+#             max_decompressed,
+#             nvcompBatchedZstdDecompressDefaultOpts,
+#             &temp_bytes,
+#             total_decompressed
+#         )
+#         if status != nvcompSuccess:
+#             raise RuntimeError(f"nvcompBatchedZstdDecompressGetTempSizeAsync failed: {status}")
+#         
+#         # Allocate temp buffer using CuPy
+#         temp_mem = None
+#         temp_ptr = NULL
+#         if temp_bytes > 0:
+#             temp_mem = cupy.empty(temp_bytes, dtype=cupy.uint8)
+#             temp_ptr = <void*><uintptr_t>temp_mem.data.ptr
+# 
+# 
+# 
+#         print(device_uncompressed_chunk_bytes)
+#         status = nvcompBatchedZstdDecompressAsync(
+#             <const void* const*><void**><uintptr_t>device_compressed_chunk_ptrs,
+#             <size_t*><uintptr_t>device_compressed_chunk_bytes.data.ptr,
+#             <size_t*><uintptr_t>device_uncompressed_buffer_bytes.data.ptr,
+#             <size_t*><uintptr_t>device_uncompressed_chunk_bytes_actual.data.ptr,
+#             device_uncompressed_chunk_bytes,
+#             num_chunks,
+#             device_temp_ptr,
+#             temp_bytes,
+#             device_uncompressed_chunk_ptrs,
+#             decompress_opts,
+#             device_statuses,
+#             self.stream,
+#         )
+#     
     def decode_batch(self, compressed_buffers):
         """Decompress a batch of zstd-compressed buffers.
         
@@ -222,7 +242,7 @@ cdef class ZstdCodec:
         if temp_bytes > 0:
             temp_mem = cupy.empty(temp_bytes, dtype=cupy.uint8)
             temp_ptr = <void*><uintptr_t>temp_mem.data.ptr
-        
+
         # Allocate device statuses buffer using CuPy
         device_statuses_mem = cupy.empty(batch_size, dtype=cupy.int32)
         device_statuses = <nvcompStatus_t*><uintptr_t>device_statuses_mem.data.ptr
@@ -272,4 +292,3 @@ cdef class ZstdCodec:
             result.append(arr)
         
         return result
-        

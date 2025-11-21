@@ -3,4 +3,3 @@
 from .zstd import ZstdCodec, DecompressedArray
 
 __all__ = ["ZstdCodec", "DecompressedArray"]
-
