@@ -130,9 +130,8 @@ def read_shard(
     path = array.store_path.store.root / array.store_path.path / key
 
     # 1. Disk -> (pinned) host memory.
-    with nvtx.annotate("read::disk"):
-        with open(path, "rb") as f, nvtx.annotate("read"):
-            f.readinto(host_buffer)
+    with open(path, "rb") as f, nvtx.annotate("read::disk"):
+        f.readinto(host_buffer)
 
     index_offset, index = offsets_sizes_array(array, host_buffer)
     index = index.tolist()
@@ -142,22 +141,22 @@ def read_shard(
         out[slice(i * stride, (i + 1) * stride)] for i in range(len(index))
     ]
 
-    # 2. (pinned) host memory -> device memory.
-    with nvtx.annotate("read::transfer"), stream:
-        device_buffer.set(host_buffer[:-index_offset].view(device_buffer.dtype), stream=stream)
+    with stream:
+        # 2. (pinned) host memory -> device memory.
+        with nvtx.annotate("read::transfer"), stream:
+            device_buffer.set(host_buffer[:-index_offset].view(device_buffer.dtype), stream=stream)
 
-    # 3. (optionally) decode the chunks.
-    if zstd_codec is not None:
-        with stream:
-            device_arrays = [
-                device_buffer[offset:offset + size] for offset, size in index
-            ]
-            with nvtx.annotate("read::decode"):
-                zstd_codec.decode_batch(device_arrays, out=out_chunks)
-    else:
-        out = device_buffer
+        # 3. (optionally) decode the chunks.
+        if zstd_codec is not None:
+                device_arrays = [
+                    device_buffer[offset:offset + size] for offset, size in index
+                ]
+                with nvtx.annotate("read::decode"):
+                    zstd_codec.decode_batch(device_arrays, out=out_chunks)
+        else:
+            out = device_buffer
 
-    return out.view(array.dtype).reshape(array.shards), junk, index
+        return out.view(array.dtype).reshape(array.shards), junk, index
 
     # # 3. GPU decompression.
     # if zstd_codec is not None:
