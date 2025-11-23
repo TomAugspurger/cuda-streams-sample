@@ -43,12 +43,10 @@ import math
 import zarr
 import zarr.storage
 import numpy as np
-import os
 import numpy.typing as npt
 from nvidia import nvcomp
 import concurrent.futures
 import nvtx
-import cupy
 import cupyx
 from rmm.allocators.cupy import rmm_cupy_allocator
 import rmm
@@ -59,6 +57,7 @@ def slices_from_chunks(chunks: tuple[int, ...], shape: tuple[int, ...]) -> list[
     stride = math.prod(chunks)
     n_chunks = math.prod(shape) // stride
     return [slice(i * stride, (i + 1) * stride) for i in range(n_chunks)]
+
 
 def ensure_chunk(array: zarr.Array, target_slice: slice, dtype: np.dtype) -> None:
     array[target_slice] = np.arange(

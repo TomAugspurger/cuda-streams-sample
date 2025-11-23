@@ -6,7 +6,6 @@ Demonstrates non-blocking host-to-device transfers using cuda.core's Pythonic AP
 import numpy as np
 import time
 import ctypes
-from typing import List
 
 import nvtx
 from cuda.bindings import runtime
@@ -95,7 +94,7 @@ def main():
     CHUNK_SIZE = TOTAL_SIZE // NUM_CHUNKS
     NUM_FLOATS = TOTAL_SIZE // np.dtype(np.float32).itemsize
 
-    print(f"Configuration:")
+    print("Configuration:")
     print(f"  Total buffer size: {TOTAL_SIZE // (1024 * 1024)} MB")
     print(f"  Number of chunks: {NUM_CHUNKS}")
     print(f"  Chunk size: {CHUNK_SIZE // (1024 * 1024)} MB")
@@ -207,7 +206,7 @@ def main():
     correct = np.allclose(verify_data, expected)
 
     if not correct:
-        print(f"✗ Data verification FAILED")
+        print("✗ Data verification FAILED")
         print(f"  Expected: {expected[:5]}")
         print(f"  Got: {verify_data[:5]}")
 

@@ -54,7 +54,7 @@ def main():
     TOTAL_SIZE = 256 * 1024 * 1024  # 256 MB
     NUM_CHUNKS = 8
     CHUNK_SIZE = TOTAL_SIZE // NUM_CHUNKS
-    NUM_FLOATS = TOTAL_SIZE // np.dtype(np.float32).itemsize
+    TOTAL_SIZE // np.dtype(np.float32).itemsize
     NUM_FLOATS_PER_CHUNK = CHUNK_SIZE // np.dtype(np.float32).itemsize
 
     # Get default device using cuda.core

@@ -1,7 +1,6 @@
 """Setup script for nvcomp_minimal."""
 
 import os
-import sys
 import sysconfig
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
