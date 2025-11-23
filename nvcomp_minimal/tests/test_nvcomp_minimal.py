@@ -25,20 +25,22 @@ def test_simple_decompress(n: int, *, use_out: bool) -> None:
     stream = cupy.cuda.Stream()
     with stream:
         zstd_codec = ZstdCodec(stream.ptr)
-        
+
         # Optionally pre-allocate output buffers
         if use_out:
             output_buffers = [
                 cupy.empty(o.nbytes, dtype=np.uint8) for o in original_data
             ]
-            decompressed_arrays = zstd_codec.decode_batch(compressed_gpu, out=output_buffers)
-            
+            decompressed_arrays = zstd_codec.decode_batch(
+                compressed_gpu, out=output_buffers
+            )
+
             # Verify the output buffers were used (same memory)
             for out_buf, dec_arr in zip(output_buffers, decompressed_arrays):
                 assert out_buf.data.ptr == dec_arr.__cuda_array_interface__["data"][0]
         else:
             decompressed_arrays = zstd_codec.decode_batch(compressed_gpu)
-        
+
         # Convert back to CuPy array
         result_gpu = [cupy.asarray(a).view(dtype) for a in decompressed_arrays]
         for o, r in zip(original_data, result_gpu, strict=True):

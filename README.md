@@ -40,3 +40,7 @@ See [nvcomp-simple.py](./nvcomp-simple.py). This workload copies Zstd-compressed
 data from the host to the device, and uses nvcomp to decompress the data. The
 host-to-device transfers and the decompression are overlapped using CUDA
 streams.
+
+## streaming
+
+See [streaming.py](./streaming.py).

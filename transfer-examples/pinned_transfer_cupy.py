@@ -3,6 +3,7 @@ This example uses cupy to transfer a set of chunks from pinned host memory to de
 
 It shows good performance.
 """
+
 import nvtx
 import cupy
 import cupyx
@@ -27,17 +28,23 @@ def main():
 
         with nvtx.annotate("Initialize Host Data"):
             for host_array in host_arrays:
-                host_array[:] = np.arange(NUM_FLOATS_PER_CHUNK, dtype=np.float32).view(host_array.dtype)
+                host_array[:] = np.arange(NUM_FLOATS_PER_CHUNK, dtype=np.float32).view(
+                    host_array.dtype
+                )
 
         with nvtx.annotate("Allocate Device Memory"):
             device_buffers = []
             for stream in streams:
                 with stream:
-                    device_buffers.append(cupy.empty(CHUNK_SIZE, dtype=np.dtype(np.byte)))
+                    device_buffers.append(
+                        cupy.empty(CHUNK_SIZE, dtype=np.dtype(np.byte))
+                    )
 
     transfer_start = time.perf_counter()
     with nvtx.annotate("Transfer"):
-        for i, (host_array, device_buffer, stream) in enumerate(zip(host_arrays, device_buffers, streams, strict=True)):
+        for i, (host_array, device_buffer, stream) in enumerate(
+            zip(host_arrays, device_buffers, streams, strict=True)
+        ):
             with nvtx.annotate(f"Transfer Chunk {i}"), stream:
                 device_buffer.set(host_array.view(device_buffer.dtype), stream=stream)
 
@@ -45,7 +52,7 @@ def main():
         for stream in streams:
             stream.synchronize()
     transfer_end = time.perf_counter()
-    
+
     with nvtx.annotate("Cleanup"):
         del device_buffers
         del host_arrays
@@ -53,9 +60,12 @@ def main():
             stream.synchronize()
         del streams
 
-    print("Transfer throughput: {:.2f} GB/s".format(TOTAL_SIZE / (transfer_end - transfer_start) / 1024 / 1024 / 1024))
+    print(
+        "Transfer throughput: {:.2f} GB/s".format(
+            TOTAL_SIZE / (transfer_end - transfer_start) / 1024 / 1024 / 1024
+        )
+    )
 
 
 if __name__ == "__main__":
     main()
-

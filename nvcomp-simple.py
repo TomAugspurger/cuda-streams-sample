@@ -48,7 +48,6 @@ def do(
     host_buffer: np.ndarray,
     use_thread: bool,
 ):
-    
     codecs = [
         nvcomp.Codec(
             algorithm="Zstd",
@@ -60,7 +59,7 @@ def do(
     ]
 
     # Pretty subtle issue around reference counting and performance here.
-    # The nvcomp.Array objects returned by nvcomp are ref counted noramally.
+    # The nvcomp.Array objects returned by nvcomp are ref counted normally.
     # But `cudaFreeHost` *possibly* blocks? It's not clear to me whether that's
     # actually true, base based on the screenshots in
     # https://github.com/TomAugspurger/cuda-streams-sample/issues/4#issue-3224110244
@@ -90,11 +89,9 @@ def do(
         stream.synchronize()
 
 
-
 def all_threaded():
     # do everything inside a thread
     ...
-
 
 
 def main():

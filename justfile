@@ -21,11 +21,5 @@ nvcomp-multi-device:
 run-multi-device:
     uv run nvcomp-multi-device.py
 
-# capture-nvcomp-compute:
-#     nsys profile -o nvcomp-compute --cuda-memory-usage=true --force-overwrite=true --trace=cuda,nvtx --python-sampling=true uv run nvcomp-compute.py
-
-# capture-zarr-vorticity:
-#     nsys profile -o zarr-vorticity --cuda-memory-usage=true --force-overwrite=true --trace=cuda,nvtx --python-sampling=true python zarr-vorticity.py
-
-# capture-zarr-uncompressed:
-#     nsys profile -o zarr-uncompressed --cuda-memory-usage=true --force-overwrite=true --trace=cuda,nvtx --python-sampling=true python zarr-uncompressed.py
+zarr-shards:
+    just capture zarr_shards.py
