@@ -12,7 +12,9 @@ This example demonstrates how to use Zarr shards to efficiently read
 and decompress chunks of data.
 
 Shards, by providing another layer of hierarchy, allow us to feed
-a batch of data to be decompressed in parallel.
+a batch of data to be decompressed in parallel, *without* exploding
+the number of files. This suites GPUs well. File I/O has some per-file
+overhead that consumes CPU time before we can get data to the device.
 
 The example will
 
@@ -21,6 +23,16 @@ The example will
 3. Decompress *each chunk* in the shard (asynchronously, using CUDA streams)
 4. Concatenate the decompressed chunks into a single array
     (ideally, we could avoid this final concat but it's not supported by nvcomp yet)
+
+
+We currently use a custom wrapper around nvcomp, `nvcomp_minimal`, to
+
+1. Avoid some (unnecessary) stream synchronization on property access,
+   which prevents pipelining I/O and computation (decompression and subsequent
+   array computation).
+2. Allows us to pass in an output array (whose size is known ahead of time, because
+   we know the shape of the shard and the itemsize from the dtype). This avoids
+   a malloc inside the decompression kernel.
 """
 
 # A note on the implementation. For simplicity, we're reimplementing much
@@ -43,8 +55,16 @@ import rmm
 import cupy
 
 
+def slices_from_chunks(chunks: tuple[int, ...], shape: tuple[int, ...]) -> list[slice]:
+    stride = math.prod(chunks)
+    n_chunks = math.prod(shape) // stride
+    return [slice(i * stride, (i + 1) * stride) for i in range(n_chunks)]
+
 def ensure_chunk(array: zarr.Array, target_slice: slice, dtype: np.dtype) -> None:
-    array[target_slice] = np.arange(0, target_slice.stop - target_slice.start, dtype=dtype)
+    array[target_slice] = np.arange(
+        0, target_slice.stop - target_slice.start, dtype=dtype
+    )
+
 
 def ensure_array(
     store: zarr.storage.LocalStore,
@@ -53,14 +73,14 @@ def ensure_array(
     shards: tuple[int, ...],
     chunks: tuple[int, ...],
     dtype: np.dtype,
-    compressors = "auto",
-    filters = "auto",
+    compressors="auto",
+    filters="auto",
     pool: concurrent.futures.ThreadPoolExecutor | None = None,
 ) -> zarr.Array:
     # store = zarr.storage.LocalStore("/tmp/data.zarr")
     # TODO: avoid re-creating the array if it already exists and has the right configuration.
     if compressors == "auto":
-        compressors = (zarr.codecs.ZstdCodec(),) 
+        compressors = (zarr.codecs.ZstdCodec(),)
     if filters == "auto":
         filters = ()
     try:
@@ -69,7 +89,14 @@ def ensure_array(
         pass
     else:
         # TODO: handle "auto" comparison
-        if array.shape == shape and array.shards == shards and array.chunks == chunks and array.dtype == dtype and array.compressors == compressors and array.filters == filters:
+        if (
+            array.shape == shape
+            and array.shards == shards
+            and array.chunks == chunks
+            and array.dtype == dtype
+            and array.compressors == compressors
+            and array.filters == filters
+        ):
             return array
 
     array = zarr.create_array(
@@ -87,12 +114,13 @@ def ensure_array(
     # write the shards in parallel
     stride = math.prod(shards)
     n_shards = math.prod(shape) // stride
-    slices = [
-        slice(i * stride, (i + 1) * stride) for i in range(n_shards)
-    ]
+    slices = [slice(i * stride, (i + 1) * stride) for i in range(n_shards)]
 
     executor = pool or concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count())
-    futures = [executor.submit(ensure_chunk, array, slice_, dtype) for i, slice_ in enumerate(slices)]
+    futures = [
+        executor.submit(ensure_chunk, array, slice_, dtype)
+        for i, slice_ in enumerate(slices)
+    ]
     concurrent.futures.wait(futures)
 
     return array
@@ -126,7 +154,7 @@ def read_shard(
     stream: cupy.cuda.stream.Stream,
     zstd_codec: nvcomp.Codec | None,
     out: cupy.ndarray | None = None,
-) -> tuple[cupy.ndarray, np.ndarray[np.uint64]]:
+) -> cupy.ndarray:
     path = array.store_path.store.root / array.store_path.path / key
 
     # 1. Disk -> (pinned) host memory.
@@ -135,70 +163,37 @@ def read_shard(
 
     index_offset, index = offsets_sizes_array(array, host_buffer)
     index = index.tolist()
-    junk = []
     stride = math.prod(array.chunks)
-    out_chunks = [
-        out[slice(i * stride, (i + 1) * stride)] for i in range(len(index))
-    ]
+    out_chunks = [out[slice(i * stride, (i + 1) * stride)] for i in range(len(index))]
 
     with stream:
         # 2. (pinned) host memory -> device memory.
         with nvtx.annotate("read::transfer"), stream:
-            device_buffer.set(host_buffer[:-index_offset].view(device_buffer.dtype), stream=stream)
+            device_buffer.set(
+                host_buffer[:-index_offset].view(device_buffer.dtype), stream=stream
+            )
 
         # 3. (optionally) decode the chunks.
         if zstd_codec is not None:
-                device_arrays = [
-                    device_buffer[offset:offset + size] for offset, size in index
-                ]
-                with nvtx.annotate("read::decode"):
-                    zstd_codec.decode_batch(device_arrays, out=out_chunks)
+            device_arrays = [
+                device_buffer[offset : offset + size] for offset, size in index
+            ]
+            with nvtx.annotate("read::decode"):
+                zstd_codec.decode_batch(device_arrays, out=out_chunks)
         else:
             out = device_buffer
 
-        return out.view(array.dtype).reshape(array.shards), junk, index
+        return out.view(array.dtype).reshape(array.shards)
 
-    # # 3. GPU decompression.
-    # if zstd_codec is not None:
-    #     decoded_arrays = zstd_codec.decode(chunks_raw_arrays)
-    # else:
-    #     decoded_arrays = chunks_raw_arrays
-
-    # # 4. Concatenate and reshape.
-
-    # with cupy.cuda.ExternalStream(int(stream)):
-    #     out = cupy.empty(array.shards, dtype=array.dtype)
-    #     for i, decoded_array in enumerate(decoded_arrays):
-    #         stride = math.prod(array.chunks)
-    #         out[i * stride : (i + 1) * stride] = cupy.array(decoded_array).view(array.dtype).reshape(array.chunks)
-
-    # return out, (buf, buf, chunks_raw_d, decoded_arrays, chunks_raw_arrays)
-
-
-# @nvtx.annotate()
-# def compute_shard(shard: cupy.ndarray, stream: numba.cuda.cudadrv.driver.Stream) -> tuple[cupy.ndarray, cupy.ndarray]:
-#     with cupy.cuda.ExternalStream(int(stream)):
-#         return shard.sum(), cupy.matmul(shard, shard)
-
-
-# @numba.cuda.jit
-# def compute_shard(x, out):
-#     tid = numba.cuda.grid(1)
-#     stride = numba.cuda.gridsize(1)
-#     for i in range(tid, x.shape[0], stride):
-#         out[0] += x[i]
-#     # size = len(x)
-#     # if tid < size:
-#     #     # for i in range(1000):
-#     #     x[tid] += x[tid] + tid + i
-#     # out[tid] = x[tid]
 
 @nvtx.annotate()
-def compute_shard(shard: cupy.ndarray, stream: cupy.cuda.stream.Stream) -> tuple[cupy.ndarray, cupy.ndarray]:
+def compute_shard(
+    shard: cupy.ndarray, stream: cupy.cuda.stream.Stream
+) -> tuple[cupy.ndarray, cupy.ndarray]:
     with stream:
         for i in range(10):
-            cupy.matmul(shard, shard), shard.cumsum(), shard.sum(), shard.mean()
-        return cupy.matmul(shard, shard), shard.cumsum(), shard.sum(), shard.mean()
+            shard @ shard, shard.cumsum(), shard.sum(), shard.mean()
+        return shard @ shard, shard.cumsum(), shard.sum(), shard.mean()
 
 
 def main():
@@ -212,10 +207,10 @@ def main():
     rmm.mr.set_current_device_resource(mr)
 
     if os.environ.get("CUPY_CUDA_ARRAY_INTERFACE_SYNC", "") != "0":
-        raise RuntimeError("CUPY_CUDA_ARRAY_INTERFACE_SYNC is set, which is not supported")
+        raise RuntimeError(
+            "CUPY_CUDA_ARRAY_INTERFACE_SYNC is set, which is not supported"
+        )
 
-    # Currently working through the issue with accessing attributes on the
-    # decoded object 2j
     COMPRESS = True
 
     chunks = (CHUNKS,)
@@ -226,30 +221,33 @@ def main():
     print("Creating array...")
     store = zarr.storage.LocalStore("/tmp/data.zarr")
     if COMPRESS:
-        array = ensure_array(store, "compressed", shape, shards, chunks, DTYPE, "auto", "auto", pool)
+        array = ensure_array(
+            store, "compressed", shape, shards, chunks, DTYPE, "auto", "auto", pool
+        )
     else:
-        array = ensure_array(store, "uncompressed", shape, shards, chunks, DTYPE, (), (), pool)
+        array = ensure_array(
+            store, "uncompressed", shape, shards, chunks, DTYPE, (), (), pool
+        )
 
     print("Array created")
-    # Summarize the sizes
     print(f"Array size: {array.nbytes:>12,} bytes")
-    print(f"Shard size: {array.shards[0] * array.dtype.itemsize:>12,} bytes")  # TODO: nd
-    print(f"Chunk size: {array.chunks[0] * array.dtype.itemsize:>12,} bytes")  # TODO: nd
+    print(
+        f"Shard size: {array.shards[0] * array.dtype.itemsize:>12,} bytes"
+    )  # TODO: nd
+    print(
+        f"Chunk size: {array.chunks[0] * array.dtype.itemsize:>12,} bytes"
+    )  # TODO: nd
 
     assert isinstance(array.store, zarr.storage.LocalStore)
     shard_keys = list(array._async_array._iter_shard_keys())
     sizes = [
-        (array.store_path.store.root / array.store_path.path / key).stat().st_size for key in shard_keys
+        (array.store_path.store.root / array.store_path.path / key).stat().st_size
+        for key in shard_keys
     ]
     streams = [cupy.cuda.stream.Stream() for _ in shard_keys]
-    host_buffers = [
-        cupyx.empty_pinned(size, dtype=np.uint8) for size in sizes
-    ]
+    host_buffers = [cupyx.empty_pinned(size, dtype=np.uint8) for size in sizes]
 
-    out_shards = [
-        cupy.empty(array.shards, dtype=array.dtype)
-        for _ in shard_keys
-    ]
+    out_shards = [cupy.empty(array.shards, dtype=array.dtype) for _ in shard_keys]
     shard_buffers = []
     index_offset = compute_index_offset(array)
     for stream, size in zip(streams, sizes, strict=True):
@@ -263,46 +261,46 @@ def main():
 
         import nvcomp_minimal
 
-        codecs = [
-            nvcomp_minimal.ZstdCodec(stream.ptr)
-            for stream in streams
-        ]
+        codecs = [nvcomp_minimal.ZstdCodec(stream.ptr) for stream in streams]
 
     else:
         codecs = [None] * len(streams)
 
-    # keep these alive, to avoid deallocation triggering (blocking) cudaFreeAsync
-
-    # threadsperblock = 256
-    # blockspergrid = (array.shards[0] + threadsperblock - 1) // threadsperblock
-
-    junk = []
-
     with nvtx.annotate("warmup"):
         stream = streams[0]
-        # out = numba.cuda.device_array(1, dtype=np.float32, stream=stream)
-        shard, decoded_arrays, index = read_shard(array, shard_keys[0], host_buffers[0], shard_buffers[0], stream, codecs[0], out_shards[0])
-        junk.append((shard_buffers, decoded_arrays, index))
+        shard = read_shard(
+            array,
+            shard_keys[0],
+            host_buffers[0],
+            shard_buffers[0],
+            stream,
+            codecs[0],
+            out_shards[0],
+        )
         compute_shard(shard, stream)
         stream.synchronize()
 
     # results = []
     shards = []
     results = []
-    # junks = []
     read_futures = {}
     decoded_arrays = []
 
-    with nvtx.annotate("benchmark"):
-        for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(shard_keys, streams, codecs, host_buffers, shard_buffers, out_shards, strict=True):
-            shard, decoded_arrays, index = read_shard(array, shard_key, host_buffer, device_buffer, stream, codec, out_shard)
-            junk.append((decoded_arrays, index))
+    with nvtx.annotate("benchmark"):  # ~300ms
+        for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(
+            shard_keys,
+            streams,
+            codecs,
+            host_buffers,
+            shard_buffers,
+            out_shards,
+            strict=True,
+        ):
+            shard = read_shard(
+                array, shard_key, host_buffer, device_buffer, stream, codec, out_shard
+            )
             shards.append(shard)
             results.append(compute_shard(shard, stream))
-
-        # # for future in concurrent.futures.as_completed(read_futures):
-        #     # stream = read_futures[future]
-        #     shard, decoded_arrays, index = future.result()
 
         with nvtx.annotate("synchronize"):
             for stream in streams:
@@ -310,12 +308,29 @@ def main():
 
     with nvtx.annotate("parallel-benchmark"):
         futures = {
-            pool.submit(read_shard, array, shard_key, host_buffer, device_buffer, stream, codec, out_shard): stream
-            for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(shard_keys, streams, codecs, host_buffers, shard_buffers, out_shards, strict=True)
+            pool.submit(
+                read_shard,
+                array,
+                shard_key,
+                host_buffer,
+                device_buffer,
+                stream,
+                codec,
+                out_shard,
+            ): stream
+            for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(
+                shard_keys,
+                streams,
+                codecs,
+                host_buffers,
+                shard_buffers,
+                out_shards,
+                strict=True,
+            )
         }
         for future in concurrent.futures.as_completed(futures):
             stream = futures[future]
-            shard, decoded_arrays, index = future.result()
+            shard = future.result()
             shards.append(shard)
             results.append(compute_shard(shard, stream))
 
@@ -323,9 +338,17 @@ def main():
             for stream in streams:
                 stream.synchronize()
 
+    slices = slices_from_chunks(array.shards, array.shape)
+    with nvtx.annotate("zarr-python"):  # ~20s
+        for slice_ in slices:
+            with nvtx.annotate("read"):
+                x = array[slice_]
+            with nvtx.annotate("compute"):
+                result = compute_shard(x, stream)
+            results.append(result)
+
     # cleanup
 
-    del junk
     del shards
     del results
     del read_futures
@@ -334,6 +357,7 @@ def main():
     del shard_buffers
     del codecs
     del streams
+
 
 if __name__ == "__main__":
     main()
