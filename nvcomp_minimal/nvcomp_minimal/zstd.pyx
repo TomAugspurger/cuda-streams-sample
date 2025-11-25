@@ -3,9 +3,7 @@
 
 """Minimal Cython wrapper for nvcomp batched zstd decompression."""
 
-from libc.stdlib cimport malloc, free
-from libc.stdint cimport uint8_t, uintptr_t
-from cpython.ref cimport PyObject
+from libc.stdint cimport uintptr_t
 import numpy as np
 import math
 import cupy

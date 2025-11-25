@@ -22,8 +22,16 @@ The example will
 2. Copy the host buffer to device memory (asynchronously, using CUDA streams)
 3. Decompress *each chunk* in the shard (asynchronously, using CUDA streams)
 4. Concatenate the decompressed chunks into a single array
-    (ideally, we could avoid this final concat but it's not supported by nvcomp yet)
 
+This example is deliberately written to be friendly to GPU acceleration. In particular
+
+- Chunk / shard sizes have been chosen to work well with the GPU I was testing on
+  (an NVIDIA V100)
+- Chunks are contiguous in shards, and shards are contiguous in the array
+
+Several parts of the example deal only with 1-D arrays. I don't think that
+this design fundamentally precludes generalizing to n-d arrays. But we *would* need
+to maintain the contiguity invariants.
 
 We currently use a custom wrapper around nvcomp, `nvcomp_minimal`, to
 
@@ -33,11 +41,10 @@ We currently use a custom wrapper around nvcomp, `nvcomp_minimal`, to
 2. Allows us to pass in an output array (whose size is known ahead of time, because
    we know the shape of the shard and the itemsize from the dtype). This avoids
    a malloc inside the decompression kernel.
+
+These are supported by nvcomp's C / C++ APIs, but not the Python wrapper.
 """
 
-# A note on the implementation. For simplicity, we're reimplementing much
-# of zarr-python here.
-# Our array computation will (probably) be done using cupy.
 import os
 import math
 import zarr
@@ -76,8 +83,6 @@ def ensure_array(
     filters="auto",
     pool: concurrent.futures.ThreadPoolExecutor | None = None,
 ) -> zarr.Array:
-    # store = zarr.storage.LocalStore("/tmp/data.zarr")
-    # TODO: avoid re-creating the array if it already exists and has the right configuration.
     if compressors == "auto":
         compressors = (zarr.codecs.ZstdCodec(),)
     if filters == "auto":
@@ -345,6 +350,17 @@ def main():
             with nvtx.annotate("compute"):
                 result = compute_shard(x, stream)
             results.append(result)
+
+    with nvtx.annotate("zarr-python-gpu"), zarr.config.enable_gpu():  # ~3s
+        stream = cupy.cuda.stream.Stream()
+        with stream:
+            for slice_ in slices:
+                with nvtx.annotate("read"):
+                    x = array[slice_]
+                with nvtx.annotate("compute"):
+                    result = compute_shard(x, stream)
+                results.append(result)
+            stream.synchronize()
 
     # cleanup
 
