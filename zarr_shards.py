@@ -45,6 +45,7 @@ We currently use a custom wrapper around nvcomp, `nvcomp_minimal`, to
 These are supported by nvcomp's C / C++ APIs, but not the Python wrapper.
 """
 
+import argparse
 import os
 import math
 import zarr
@@ -200,7 +201,20 @@ def compute_shard(
         return shard @ shard, shard.cumsum(), shard.sum(), shard.mean()
 
 
+def parse_args(args: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Benchmark zarr shards",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--benchmark-gpu", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--benchmark-cpu", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--benchmark-zarr-gpu", action=argparse.BooleanOptionalAction)
+    return parser.parse_args(args)
+
+
 def main():
+    parsed = parse_args()
+
     CHUNKS = 200_000
     CHUNKS_PER_SHARD = 400
     SHARDS_PER_ARRAY = 4
@@ -287,8 +301,6 @@ def main():
     # results = []
     shards = []
     results = []
-    read_futures = {}
-    decoded_arrays = []
 
     with nvtx.annotate("benchmark"):  # ~300ms
         for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(
@@ -310,68 +322,61 @@ def main():
             for stream in streams:
                 stream.synchronize()
 
-    with nvtx.annotate("parallel-benchmark"):
-        futures = {
-            pool.submit(
-                read_shard,
-                array,
-                shard_key,
-                host_buffer,
-                device_buffer,
-                stream,
-                codec,
-                out_shard,
-            ): stream
-            for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(
-                shard_keys,
-                streams,
-                codecs,
-                host_buffers,
-                shard_buffers,
-                out_shards,
-                strict=True,
-            )
-        }
-        for future in concurrent.futures.as_completed(futures):
-            stream = futures[future]
-            shard = future.result()
-            shards.append(shard)
-            results.append(compute_shard(shard, stream))
+    if parsed.benchmark_gpu:
+        with nvtx.annotate("parallel-benchmark"):
+            futures = {
+                pool.submit(
+                    read_shard,
+                    array,
+                    shard_key,
+                    host_buffer,
+                    device_buffer,
+                    stream,
+                    codec,
+                    out_shard,
+                ): stream
+                for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(
+                    shard_keys,
+                    streams,
+                    codecs,
+                    host_buffers,
+                    shard_buffers,
+                    out_shards,
+                    strict=True,
+                )
+            }
+            for future in concurrent.futures.as_completed(futures):
+                stream = futures[future]
+                shard = future.result()
+                shards.append(shard)
+                results.append(compute_shard(shard, stream))
 
-        with nvtx.annotate("synchronize"):
-            for stream in streams:
-                stream.synchronize()
+            with nvtx.annotate("synchronize"):
+                for stream in streams:
+                    stream.synchronize()
 
     slices = slices_from_chunks(array.shards, array.shape)
-    with nvtx.annotate("zarr-python"):  # ~20s
-        for slice_ in slices:
-            with nvtx.annotate("read"):
-                x = array[slice_]
-            with nvtx.annotate("compute"):
-                result = compute_shard(x, stream)
-            results.append(result)
 
-    with nvtx.annotate("zarr-python-gpu"), zarr.config.enable_gpu():  # ~3s
-        stream = cupy.cuda.stream.Stream()
-        with stream:
+    if parsed.benchmark_cpu:
+        with nvtx.annotate("zarr-python"):  # ~20s
             for slice_ in slices:
                 with nvtx.annotate("read"):
                     x = array[slice_]
                 with nvtx.annotate("compute"):
                     result = compute_shard(x, stream)
                 results.append(result)
-            stream.synchronize()
 
-    # cleanup
-
-    del shards
-    del results
-    del read_futures
-    del decoded_arrays
-    del host_buffers
-    del shard_buffers
-    del codecs
-    del streams
+    if parsed.benchmark_zarr_gpu:
+        with nvtx.annotate("zarr-python-gpu"), zarr.config.enable_gpu():  # ~3s
+            stream = cupy.cuda.stream.Stream()
+            with stream:
+                for slice_ in slices:
+                    with nvtx.annotate("read"):
+                        x = array[slice_]
+                    with nvtx.annotate("compute"):
+                        result = compute_shard(x, stream)
+                    results.append(result)
+                stream.synchronize()
 
 
 if __name__ == "__main__":
