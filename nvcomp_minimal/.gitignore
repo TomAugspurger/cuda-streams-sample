@@ -1,2 +1,6 @@
 **.cpp
 *.so
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+*.conda

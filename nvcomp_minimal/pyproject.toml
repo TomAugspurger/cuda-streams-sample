@@ -18,7 +18,38 @@ dev = [
     "nvtx",
 ]
 
-# [tool.setuptools]
-# ext-modules = [
-#   {name = "nvcomp_minimal", sources = ["nvcomp_minimal/zstdt .pyx"]}
-# ]
+[tool.pixi.workspace]
+channels = [
+  "https://prefix.dev/pixi-build-backends",
+  "https://prefix.dev/conda-forge",
+]
+platforms = ["linux-64"]
+preview = ["pixi-build"]
+
+[tool.pixi.pypi-dependencies]
+nvcomp-minimal = { path = ".", editable = true }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+
+[tool.pixi.tasks]
+build = "python -m build"
+
+[tool.pixi.package] 
+name = "nvcomp-minimal"
+version = "0.1.0"
+
+[tool.pixi.package.build] 
+backend = { name = "pixi-build-python", version = "0.1.*" }
+
+[tool.pixi.package.host-dependencies] 
+setuptools = ">=75.0.0"
+wheel = ">=0.44.0"
+Cython = ">=3.1.0"
+nvcomp = ">=5"
+libnvcomp-dev = ">=5"
+
+[tool.pixi.package.run-dependencies] 
+nvcomp = ">=5"
+cupy = ">=13.6.0"
