@@ -206,7 +206,9 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         description="Benchmark zarr shards",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--benchmark-gpu", action=argparse.BooleanOptionalAction)
+    parser.add_argument(
+        "--benchmark-parallel-gpu", action=argparse.BooleanOptionalAction
+    )
     parser.add_argument("--benchmark-cpu", action=argparse.BooleanOptionalAction)
     parser.add_argument("--benchmark-zarr-gpu", action=argparse.BooleanOptionalAction)
     return parser.parse_args(args)
@@ -322,7 +324,7 @@ def main():
             for stream in streams:
                 stream.synchronize()
 
-    if parsed.benchmark_gpu:
+    if parsed.benchmark_parallel_gpu:
         with nvtx.annotate("parallel-benchmark"):
             futures = {
                 pool.submit(
