@@ -151,6 +151,20 @@ def offsets_sizes_array(
 
 
 @nvtx.annotate()
+def read_and_compute_shard(
+    array: zarr.Array,
+    key: str,
+    host_buffer: np.ndarray[np.uint8],
+    device_buffer: cupy.ndarray,
+    stream: cupy.cuda.stream.Stream,
+    zstd_codec: nvcomp.Codec | None,
+    out: cupy.ndarray | None = None,
+) -> cupy.ndarray:
+    shard = read_shard(array, key, host_buffer, device_buffer, stream, zstd_codec, out)
+    return compute_shard(shard, stream)
+
+
+@nvtx.annotate()
 def read_shard(
     array: zarr.Array,
     key: str,
@@ -196,9 +210,10 @@ def compute_shard(
     shard: cupy.ndarray, stream: cupy.cuda.stream.Stream
 ) -> tuple[cupy.ndarray, cupy.ndarray]:
     with stream:
-        for i in range(10):
-            shard @ shard, shard.cumsum(), shard.sum(), shard.mean()
-        return shard @ shard, shard.cumsum(), shard.sum(), shard.mean()
+        for i in range(75):
+            shard @ shard
+
+        return shard @ shard
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
@@ -217,9 +232,15 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
 def main():
     parsed = parse_args()
 
-    CHUNKS = 200_000
+    # V100 settings
+    # CHUNKS = 200_000
+    # CHUNKS_PER_SHARD = 400
+    # SHARDS_PER_ARRAY = 4
+
+    # H100 settings
+    CHUNKS = 256_000
     CHUNKS_PER_SHARD = 400
-    SHARDS_PER_ARRAY = 4
+    SHARDS_PER_ARRAY = 8
     DTYPE = np.dtype("float32")
     cupy.cuda.set_allocator(rmm_cupy_allocator)
 
@@ -328,7 +349,7 @@ def main():
         with nvtx.annotate("parallel-benchmark"):
             futures = {
                 pool.submit(
-                    read_shard,
+                    read_and_compute_shard,
                     array,
                     shard_key,
                     host_buffer,
@@ -337,25 +358,24 @@ def main():
                     codec,
                     out_shard,
                 ): stream
-                for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(
-                    shard_keys,
-                    streams,
-                    codecs,
-                    host_buffers,
-                    shard_buffers,
-                    out_shards,
-                    strict=True,
-                )
+            for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(
+                shard_keys,
+                streams,
+                codecs,
+                host_buffers,
+                shard_buffers,
+                out_shards,
+                strict=True,
+            )
             }
             for future in concurrent.futures.as_completed(futures):
                 stream = futures[future]
-                shard = future.result()
-                shards.append(shard)
-                results.append(compute_shard(shard, stream))
+                result = future.result()
+                results.append(result)
 
-            with nvtx.annotate("synchronize"):
-                for stream in streams:
-                    stream.synchronize()
+                with nvtx.annotate("synchronize"):
+                    for stream in streams:
+                        stream.synchronize()
 
     slices = slices_from_chunks(array.shards, array.shape)
 
