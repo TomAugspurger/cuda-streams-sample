@@ -56,10 +56,19 @@ from nvidia import nvcomp
 import concurrent.futures
 import nvtx
 import cupyx
+import time
 from rmm.allocators.cupy import rmm_cupy_allocator
 import rmm
 import cupy
+import contextlib
 
+
+@contextlib.contextmanager
+def timed(name: str):
+    start = time.perf_counter()
+    yield
+    end = time.perf_counter()
+    print(f"{name}: {end - start:0.3f} s")
 
 def slices_from_chunks(chunks: tuple[int, ...], shape: tuple[int, ...]) -> list[slice]:
     stride = math.prod(chunks)
@@ -235,8 +244,8 @@ def main():
     # V100 settings
     # CHUNKS = 200_000
     # CHUNKS_PER_SHARD = 400
-    # SHARDS_PER_ARRAY = 4
 
+    # SHARDS_PER_ARRAY = 4
     # H100 settings
     CHUNKS = 256_000
     CHUNKS_PER_SHARD = 400
@@ -307,7 +316,7 @@ def main():
     else:
         codecs = [None] * len(streams)
 
-    with nvtx.annotate("warmup"):
+    with nvtx.annotate("warmup"), timed("warmup"):
         stream = streams[0]
         shard = read_shard(
             array,
@@ -325,7 +334,7 @@ def main():
     shards = []
     results = []
 
-    with nvtx.annotate("benchmark"):  # ~300ms
+    with nvtx.annotate("benchmark"), timed("custom-gpu"):  # ~300ms
         for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(
             shard_keys,
             streams,
@@ -346,7 +355,7 @@ def main():
                 stream.synchronize()
 
     if parsed.benchmark_parallel_gpu:
-        with nvtx.annotate("parallel-benchmark"):
+        with nvtx.annotate("parallel-benchmark"), timed("custom-gpu-parallel"):
             futures = {
                 pool.submit(
                     read_and_compute_shard,
@@ -380,7 +389,7 @@ def main():
     slices = slices_from_chunks(array.shards, array.shape)
 
     if parsed.benchmark_cpu:
-        with nvtx.annotate("zarr-python"):  # ~20s
+        with nvtx.annotate("zarr-python"), timed("zarr-python-cpu"):  # ~20s
             for slice_ in slices:
                 with nvtx.annotate("read"):
                     x = array[slice_]
@@ -389,7 +398,7 @@ def main():
                 results.append(result)
 
     if parsed.benchmark_zarr_gpu:
-        with nvtx.annotate("zarr-python-gpu"), zarr.config.enable_gpu():  # ~3s
+        with nvtx.annotate("zarr-python-gpu"), zarr.config.enable_gpu(), timed("zarr-python-gpu"):  # ~3s
             stream = cupy.cuda.stream.Stream()
             with stream:
                 for slice_ in slices:
