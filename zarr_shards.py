@@ -61,14 +61,25 @@ from rmm.allocators.cupy import rmm_cupy_allocator
 import rmm
 import cupy
 import contextlib
+import pandas as pd
+
+import cuda.compute
+from cuda.compute import (
+    CountingIterator,
+    TransformIterator,
+    ZipIterator,
+    gpu_struct,
+)
 
 
 @contextlib.contextmanager
-def timed(name: str):
+def timed(name: str, nbytes: int):
     start = time.perf_counter()
     yield
     end = time.perf_counter()
-    print(f"{name}: {end - start:0.3f} s")
+    throughput = nbytes / (end - start) / 1024**3
+    print(f"{name}: {end - start:0.3f} s, {throughput:0.3f} GB/s")
+
 
 def slices_from_chunks(chunks: tuple[int, ...], shape: tuple[int, ...]) -> list[slice]:
     stride = math.prod(chunks)
@@ -138,6 +149,12 @@ def ensure_array(
     concurrent.futures.wait(futures)
 
     return array
+
+
+@nvtx.annotate()
+def read_and_compute_host(array: zarr.Array, slice_: slice) -> np.ndarray:
+    x = array[slice_]
+    return compute_shard_host(x)
 
 
 def compute_index_offset(array: zarr.Array) -> int:
@@ -214,15 +231,73 @@ def read_shard(
         return out.view(array.dtype).reshape(array.shards)
 
 
+class StreamWrapper:
+    def __init__(self, stream: cupy.cuda.stream.Stream):
+        self.stream = stream
+
+    def __cuda_stream__(self) -> tuple[int, int]:
+        return (0, self.stream.ptr)
+
+
 @nvtx.annotate()
 def compute_shard(
-    shard: cupy.ndarray, stream: cupy.cuda.stream.Stream
+    shard: cupy.ndarray, stream: cupy.cuda.stream.Stream, alpha: float = 0.05
 ) -> tuple[cupy.ndarray, cupy.ndarray]:
     with stream:
-        for i in range(75):
-            shard @ shard
 
-        return shard @ shard
+        @gpu_struct
+        class ValueScale:
+            value: cupy.float64
+            scale: cupy.int64
+
+        def add_op(v1: ValueScale, v2: ValueScale) -> ValueScale:
+            if v1.scale > v2.scale:
+                s = v2.scale
+                v = v2.value + v1.value * (alpha ** (v1.scale - v2.scale))
+            else:
+                s = v1.scale
+                v = v1.value + v2.value * (alpha ** (v2.scale - v1.scale))
+            return ValueScale(v, s)
+
+        def negative_op(i: cupy.int64) -> cupy.int64:
+            return -i
+
+        seq_it = CountingIterator(cupy.int64(0))
+        negative_exponents_it = TransformIterator(seq_it, negative_op)
+        d_inp = ZipIterator(shard, negative_exponents_it)
+
+        d_cumsum = cupy.empty(shard.shape, dtype=ValueScale.dtype)
+        h_init = ValueScale(0.0, 0)
+
+        cuda.compute.inclusive_scan(
+            d_inp, d_cumsum, add_op, h_init, shard.size, stream=StreamWrapper(stream)
+        )
+
+        it_seq = CountingIterator(cupy.int64(0))
+        d_ema = cupy.empty_like(shard)
+
+        def combine_op(v: ValueScale, t: cupy.int64) -> cupy.float64:
+            return (1 - alpha) * v.value * alpha ** (t + v.scale)
+
+        cuda.compute.binary_transform(d_cumsum, it_seq, d_ema, combine_op, shard.size)
+
+        d_ema += (alpha ** cupy.arange(1, shard.size + 1)) * shard[0]
+
+    return d_ema
+
+
+@nvtx.annotate()
+def compute_shard_host(shard: np.ndarray, alpha: float = 0.05) -> np.ndarray:
+    return pd.Series(shard).ewm(alpha=alpha).mean().to_numpy()
+
+
+@nvtx.annotate()
+def compute_matmul(
+    shard: cupy.ndarray | np.ndarray, stream: cupy.cuda.stream.Stream
+) -> cupy.ndarray | np.ndarray:
+    for i in range(75):
+        shard @ shard
+    return shard @ shard
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
@@ -235,6 +310,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--benchmark-cpu", action=argparse.BooleanOptionalAction)
     parser.add_argument("--benchmark-zarr-gpu", action=argparse.BooleanOptionalAction)
+
+    # V100 settings
+    parser.add_argument("--n-chunks", type=int, default=200_000)
+    parser.add_argument("--n-chunks-per-shard", type=int, default=400)
+    parser.add_argument("--n-shards-per-array", type=int, default=4)
+
     return parser.parse_args(args)
 
 
@@ -242,14 +323,14 @@ def main():
     parsed = parse_args()
 
     # V100 settings
-    # CHUNKS = 200_000
-    # CHUNKS_PER_SHARD = 400
+    CHUNKS = parsed.n_chunks
+    CHUNKS_PER_SHARD = parsed.n_chunks_per_shard
+    SHARDS_PER_ARRAY = parsed.n_shards_per_array
 
-    # SHARDS_PER_ARRAY = 4
     # H100 settings
-    CHUNKS = 256_000
-    CHUNKS_PER_SHARD = 400
-    SHARDS_PER_ARRAY = 8
+    # CHUNKS = 256_000
+    # CHUNKS_PER_SHARD = 400
+    # SHARDS_PER_ARRAY = 8
     DTYPE = np.dtype("float32")
     cupy.cuda.set_allocator(rmm_cupy_allocator)
 
@@ -316,7 +397,10 @@ def main():
     else:
         codecs = [None] * len(streams)
 
-    with nvtx.annotate("warmup"), timed("warmup"):
+    with (
+        nvtx.annotate("warmup"),
+        timed("warmup", math.prod(array.shards) * array.dtype.itemsize),
+    ):
         stream = streams[0]
         shard = read_shard(
             array,
@@ -334,7 +418,7 @@ def main():
     shards = []
     results = []
 
-    with nvtx.annotate("benchmark"), timed("custom-gpu"):  # ~300ms
+    with nvtx.annotate("benchmark"), timed("custom-gpu", array.nbytes):  # ~300ms
         for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(
             shard_keys,
             streams,
@@ -355,7 +439,10 @@ def main():
                 stream.synchronize()
 
     if parsed.benchmark_parallel_gpu:
-        with nvtx.annotate("parallel-benchmark"), timed("custom-gpu-parallel"):
+        with (
+            nvtx.annotate("parallel-benchmark"),
+            timed("custom-gpu-parallel", array.nbytes),
+        ):
             futures = {
                 pool.submit(
                     read_and_compute_shard,
@@ -367,15 +454,15 @@ def main():
                     codec,
                     out_shard,
                 ): stream
-            for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(
-                shard_keys,
-                streams,
-                codecs,
-                host_buffers,
-                shard_buffers,
-                out_shards,
-                strict=True,
-            )
+                for shard_key, stream, codec, host_buffer, device_buffer, out_shard in zip(
+                    shard_keys,
+                    streams,
+                    codecs,
+                    host_buffers,
+                    shard_buffers,
+                    out_shards,
+                    strict=True,
+                )
             }
             for future in concurrent.futures.as_completed(futures):
                 stream = futures[future]
@@ -389,16 +476,23 @@ def main():
     slices = slices_from_chunks(array.shards, array.shape)
 
     if parsed.benchmark_cpu:
-        with nvtx.annotate("zarr-python"), timed("zarr-python-cpu"):  # ~20s
-            for slice_ in slices:
-                with nvtx.annotate("read"):
-                    x = array[slice_]
-                with nvtx.annotate("compute"):
-                    result = compute_shard(x, stream)
+        with (
+            nvtx.annotate("zarr-python"),
+            timed("zarr-python-cpu", array.nbytes),
+        ):  # ~20s
+            futures = [
+                pool.submit(read_and_compute_host, array, slice_) for slice_ in slices
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
                 results.append(result)
 
     if parsed.benchmark_zarr_gpu:
-        with nvtx.annotate("zarr-python-gpu"), zarr.config.enable_gpu(), timed("zarr-python-gpu"):  # ~3s
+        with (
+            nvtx.annotate("zarr-python-gpu"),
+            zarr.config.enable_gpu(),
+            timed("zarr-python-gpu", array.nbytes),
+        ):  # ~3s
             stream = cupy.cuda.stream.Stream()
             with stream:
                 for slice_ in slices:
