@@ -1,12 +1,17 @@
 [build-system]
-requires = ["setuptools", "wheel", "Cython", "nvidia-nvcomp-cu12"]
+requires = [
+    "setuptools>=75.0.0",
+    "wheel>=0.44.0",
+    "Cython>=3.1.0",
+]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "nvcomp-minimal"
 version = "0.1.0"
 description = "Minimal Cython wrapper for nvcomp zstd decompression"
-requires-python = ">=3.13"
+readme = "README.md"
+requires-python = ">=3.12"
 dependencies = [
     "cupy-cuda12x",
     "numpy",

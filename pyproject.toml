@@ -3,13 +3,14 @@ name = "stream-tests"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "cuda-cccl[cu12]>=0.4.0",
     "cupy-cuda12x>=13.6.0",
     "ipython>=9.7.0",
     "numcodecs>=0.16.3",
     "numpy>=2.3.4",
+    "nvcomp-minimal @ file:///${PROJECT_ROOT}/nvcomp_minimal",
     "nvidia-nvcomp-cu12>=5.0.0.6",
     "nvtx>=0.2.13",
     "pandas>=2.3.3",

@@ -27,24 +27,41 @@ nvcomp_home = os.environ.get("NVCOMP_HOME", None)
 
 # Try common nvcomp locations if not specified
 if nvcomp_home is None:
-    # First, try nvidia-nvcomp-cu12 wheel installation
-    site_packages = sysconfig.get_path("purelib")
-    wheel_nvcomp = os.path.join(site_packages, "nvidia", "nvcomp")
+    # First, check for conda/pixi environment
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    pixi_prefix = os.environ.get("PIXI_PROJECT_ROOT")
 
-    if os.path.exists(os.path.join(wheel_nvcomp, "include", "nvcomp.h")):
-        print(f"Found nvcomp from nvidia-nvcomp-cu12 wheel at: {wheel_nvcomp}")
-        nvcomp_home = wheel_nvcomp
-    else:
-        # Try system paths
-        for possible_path in [
-            "/usr/local/nvcomp",
-            "/usr/local",
-            "/opt/nvcomp",
-            os.path.expanduser("~/.local"),
-        ]:
-            if os.path.exists(os.path.join(possible_path, "include", "nvcomp.h")):
-                nvcomp_home = possible_path
-                break
+    if conda_prefix and os.path.exists(
+        os.path.join(conda_prefix, "include", "nvcomp.h")
+    ):
+        print(f"Found nvcomp in conda/pixi environment at: {conda_prefix}")
+        nvcomp_home = conda_prefix
+    elif pixi_prefix:
+        # Try to find the pixi environment directory
+        pixi_env = os.path.join(pixi_prefix, ".pixi", "envs", "default")
+        if os.path.exists(os.path.join(pixi_env, "include", "nvcomp.h")):
+            print(f"Found nvcomp in pixi environment at: {pixi_env}")
+            nvcomp_home = pixi_env
+
+    # Next, try nvidia-nvcomp-cu12 wheel installation
+    if nvcomp_home is None:
+        site_packages = sysconfig.get_path("purelib")
+        wheel_nvcomp = os.path.join(site_packages, "nvidia", "nvcomp")
+
+        if os.path.exists(os.path.join(wheel_nvcomp, "include", "nvcomp.h")):
+            print(f"Found nvcomp from nvidia-nvcomp-cu12 wheel at: {wheel_nvcomp}")
+            nvcomp_home = wheel_nvcomp
+        else:
+            # Try system paths
+            for possible_path in [
+                "/usr/local/nvcomp",
+                "/usr/local",
+                "/opt/nvcomp",
+                os.path.expanduser("~/.local"),
+            ]:
+                if os.path.exists(os.path.join(possible_path, "include", "nvcomp.h")):
+                    nvcomp_home = possible_path
+                    break
 
 if nvcomp_home is None:
     print("Warning: Could not find nvcomp. Set NVCOMP_HOME environment variable.")

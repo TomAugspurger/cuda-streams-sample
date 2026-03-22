@@ -1,12 +1,3 @@
-# /// script
-# requires-python = ">=3.12.0,<3.13"
-# dependencies = [
-#   "numba-cuda[cu12]",
-#   "cupy-cuda12x",
-#   "nvtx",
-#   "zarr",
-# ]
-# ///
 """
 This example demonstrates how to use Zarr shards to efficiently read
 and decompress chunks of data.
